@@ -129,7 +129,7 @@ def home():
             "example_get": "https://your-domain.vercel.app/check/2919267964",
             "example_post": "POST to /check with JSON: {'uid': '2919267964'}"
         },
-        "author": "Yash"
+        "author": "Krsxh@blackhat"
     })
 
 @app.route('/check/<uid>', methods=['GET'])
