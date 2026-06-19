@@ -1,12 +1,14 @@
 from flask import Flask, request, jsonify
 import requests
 from flask_cors import CORS
+import time
 
 app = Flask(__name__)
 CORS(app)
 
 # ------------------------------------------------- CONFIG --------------------------------------------------------------------------------------
 BANCHECK_API_URL = "https://ff.garena.com/api/antihack/check_banned?lang=en&uid={uid}"
+SHOP2GAME_API_URL = "https://shop2game.com/api/auth/player_id_login"
 # -----------------------------------------------------------------------------------------------------------------------------------------------------
 
 BANCHECK_HEADERS = {
@@ -24,81 +26,128 @@ BANCHECK_HEADERS = {
     'x-requested-with': 'B6FksShzIgjfrYImLpTsadjS86sddhFH',
 }
 
+SHOP2GAME_COOKIES = {
+    '_ga': 'GA1.1.2123120599.1674510784',
+    '_fbp': 'fb.1.1674510785537.363500115',
+    '_ga_7JZFJ14B0B': 'GS1.1.1674510784.1.1.1674510789.0.0.0',
+    'source': 'mb',
+    'region': 'MA',
+    'language': 'ar',
+    '_ga_TVZ1LG7BEB': 'GS1.1.1674930050.3.1.1674930171.0.0.0',
+    'datadome': '6h5F5cx_GpbuNtAkftMpDjsbLcL3op_5W5Z-npxeT_qcEe_7pvil2EuJ6l~JlYDxEALeyvKTz3~LyC1opQgdP~7~UDJ0jYcP5p20IQlT3aBEIKDYLH~cqdfXnnR6FAL0',
+    'session_key': 'efwfzwesi9ui8drux4pmqix4cosane0y',
+}
+
+SHOP2GAME_HEADERS = {
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Connection': 'keep-alive',
+    'Origin': 'https://shop2game.com',
+    'Referer': 'https://shop2game.com/app/100067/idlogin',
+    'User-Agent': 'Mozilla/5.0 (Linux; Android 11; Redmi Note 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Mobile Safari/537.36',
+    'accept': 'application/json',
+    'content-type': 'application/json',
+    'sec-ch-ua': '"Chromium";v="107", "Not=A?Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'x-datadome-clientid': '6h5F5cx_GpbuNtAkftMpDjsbLcL3op_5W5Z-npxeT_qcEe_7pvil2EuJ6l~JlYDxEALeyvKTz3~LyC1opQgdP~7~UDJ0jYcP5p20IQlT3aBEIKDYLH~cqdfXnnR6FAL0',
+}
+
 def is_valid_uid(uid: str) -> bool:
     return uid.isdigit() and 8 <= len(uid) <= 11
 
-def convert_ban_period_to_status(period_value):
-    try:
-        period = int(period_value)
-    except:
-        return "Unknown"
-    return "Not Banned ✅" if period == 0 else "Banned ❌"
-
-def check_ban_status(uid: str):
+def check_player_info(uid: str):
+    """Check player info with ban status"""
+    start_time = time.time()
+    
     if not is_valid_uid(uid):
         return {
             "error": True,
-            "message": "Invalid UID (must be 8-11 digits)",
-            "status": "error"
+            "message": "Invalid UID (must be 8-11 digits)"
         }
     
     try:
-        response = requests.get(
+        # Get player info from shop2game
+        json_data = {
+            'app_id': 100067,
+            'login_id': uid,
+            'app_server_id': 0,
+        }
+        
+        res = requests.post(
+            SHOP2GAME_API_URL,
+            cookies=SHOP2GAME_COOKIES,
+            headers=SHOP2GAME_HEADERS,
+            json=json_data,
+            timeout=10
+        )
+        
+        if res.status_code != 200 or not res.json().get('nickname'):
+            return {
+                "error": True,
+                "message": "Player ID not found"
+            }
+        
+        player_data = res.json()
+        nickname = player_data.get('nickname', 'N/A')
+        region = player_data.get('region', 'N/A')
+        level = player_data.get('level', 'N/A')
+        likes = player_data.get('likes', 'N/A')
+        
+        # Get ban status
+        ban_response = requests.get(
             BANCHECK_API_URL.format(uid=uid),
             headers=BANCHECK_HEADERS,
             timeout=10
         )
         
-        if response.status_code == 200:
-            data = response.json().get("data", {})
-            period = data.get("period", None)
-            reason = data.get("reason") or data.get("desc") or ""
+        if ban_response.status_code == 200:
+            ban_data = ban_response.json().get("data", {})
+            period = ban_data.get("period", 0)
             is_banned = period != 0 if period is not None else False
+            reason = ban_data.get("reason") or ban_data.get("desc") or "No reason provided"
+            
+            if is_banned:
+                ban_status = "Banned ❌"
+                ban_period = f"{period} months" if period > 0 else "Permanent"
+            else:
+                ban_status = "Not Banned ✅"
+                ban_period = "0 months"
+            
+            response_time = f"{round((time.time() - start_time) * 1000)}ms"
             
             return {
-                "error": False,
                 "success": True,
                 "uid": uid,
-                "status": convert_ban_period_to_status(period),
-                "status_code": "banned" if is_banned else "not_banned",
-                "is_banned": is_banned,
-                "period": period,
+                "nickname": nickname,
+                "level": level,
+                "likes": likes,
+                "region": region,
+                "ban_status": ban_status,
+                "period": ban_period,
                 "reason": reason,
-                "timestamp": data.get("timestamp"),
-                "raw_data": data,
-
-                # 🔥 NEW FIELD
+                "response_time": response_time,
                 "gif": "https://files.catbox.moe/lns4kb.gif" if is_banned else "https://files.catbox.moe/7to40v.gif"
             }
         else:
             return {
                 "error": True,
-                "success": False,
-                "message": f"API Error ({response.status_code})",
-                "status": "api_error",
-                "status_code": response.status_code
+                "message": "Failed to retrieve ban status"
             }
             
     except requests.exceptions.Timeout:
         return {
             "error": True,
-            "success": False,
-            "message": "Request timeout",
-            "status": "timeout"
+            "message": "Request timeout"
         }
     except requests.exceptions.ConnectionError:
         return {
             "error": True,
-            "success": False,
-            "message": "Connection error",
-            "status": "connection_error"
+            "message": "Connection error"
         }
     except Exception as e:
         return {
             "error": True,
-            "success": False,
-            "message": f"Request failed: {str(e)}",
-            "status": "error"
+            "message": f"Request failed: {str(e)}"
         }
 
 # ============================================
@@ -109,26 +158,36 @@ def check_ban_status(uid: str):
 def home():
     return jsonify({
         "status": "online",
-        "service": "Free Fire Ban Check API",
+        "service": "Free Fire Player Info & Ban Check API",
         "endpoints": {
-            "GET /check/<uid>": "Check ban status by UID",
-            "GET /check?uid=<uid>": "Check ban status via query parameter",
-            "POST /check": "Check ban status via POST request"
+            "GET /check/<uid>": "Get player info & ban status by UID",
+            "GET /check?uid=<uid>": "Get player info & ban status via query",
+            "POST /check": "Get player info & ban status via POST"
         },
-        "usage": {
-            "example_get": "https://your-domain.vercel.app/check/2919267964",
-            "example_post": "POST to /check with JSON: {'uid': '2919267964'}"
-        },
+        "response_fields": [
+            "uid",
+            "nickname",
+            "level",
+            "likes",
+            "region",
+            "ban_status",
+            "period",
+            "reason",
+            "response_time",
+            "gif"
+        ],
         "author": "Krsxh@blackhat"
     })
 
 @app.route('/check/<uid>', methods=['GET'])
 def check_by_path(uid):
-    result = check_ban_status(uid)
+    """Get player info with ban status"""
+    result = check_player_info(uid)
     return jsonify(result)
 
 @app.route('/check', methods=['GET'])
 def check_by_query():
+    """Check by query parameter"""
     uid = request.args.get('uid')
     
     if not uid:
@@ -138,11 +197,12 @@ def check_by_query():
             "example": "/check?uid=2919267964"
         }), 400
     
-    result = check_ban_status(uid)
+    result = check_player_info(uid)
     return jsonify(result)
 
 @app.route('/check', methods=['POST'])
 def check_by_post():
+    """Check via POST request"""
     if request.is_json:
         data = request.get_json()
         uid = data.get('uid')
@@ -156,15 +216,15 @@ def check_by_post():
             "example": {"uid": "2919267964"}
         }), 400
     
-    result = check_ban_status(uid)
+    result = check_player_info(uid)
     return jsonify(result)
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
         "status": "healthy",
-        "service": "bancheck-api",
-        "timestamp": "Server time here"
+        "service": "ff-player-check",
+        "version": "3.0.0"
     })
 
 @app.route('/batch', methods=['POST'])
@@ -192,11 +252,11 @@ def batch_check():
     results = []
     for uid in uids:
         uid = str(uid).strip()
-        result = check_ban_status(uid)
+        result = check_player_info(uid)
         results.append(result)
     
     return jsonify({
-        "error": False,
+        "success": True,
         "count": len(results),
         "results": results
     })
@@ -206,7 +266,7 @@ def not_found(error):
     return jsonify({
         "error": True,
         "message": "Endpoint not found",
-        "available_endpoints": ["/", "/check", "/health", "/batch"]
+        "available_endpoints": ["/", "/check", "/check/<uid>", "/health", "/batch"]
     }), 404
 
 @app.errorhandler(500)
