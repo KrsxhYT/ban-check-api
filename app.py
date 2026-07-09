@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 from flask_cors import CORS
 import time
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
@@ -55,6 +56,154 @@ SHOP2GAME_HEADERS = {
 def is_valid_uid(uid: str) -> bool:
     return uid.isdigit() and 8 <= len(uid) <= 11
 
+def format_time_duration(seconds):
+    """Format seconds into human readable duration"""
+    if seconds <= 0:
+        return "0 seconds"
+    
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    
+    parts = []
+    if days > 0:
+        parts.append(f"{days} day{'s' if days > 1 else ''}")
+    if hours > 0:
+        parts.append(f"{hours} hour{'s' if hours > 1 else ''}")
+    if minutes > 0:
+        parts.append(f"{minutes} minute{'s' if minutes > 1 else ''}")
+    if secs > 0 and not parts:  # Only show seconds if no larger units
+        parts.append(f"{secs} second{'s' if secs > 1 else ''}")
+    elif secs > 0 and parts:
+        parts.append(f"{secs} second{'s' if secs > 1 else ''}")
+    
+    return ", ".join(parts)
+
+def parse_ban_data(ban_data):
+    """Parse ban data and return comprehensive ban information"""
+    period = ban_data.get("period", 0)
+    reason = ban_data.get("reason") or ban_data.get("desc") or "No reason provided"
+    ban_start = ban_data.get("ban_start") or ban_data.get("start_time")
+    ban_end = ban_data.get("ban_end") or ban_data.get("end_time")
+    
+    # Check if banned
+    is_banned = False
+    ban_status = "Not Banned ✅"
+    ban_type = "Not Banned"
+    
+    # If period is 0 or negative, might not be banned
+    if period is None:
+        period = 0
+    
+    # Try to determine ban status from multiple fields
+    if period > 0:
+        is_banned = True
+    elif period == -1:
+        is_banned = True
+        ban_type = "Permanent"
+    elif ban_start and ban_end:
+        # Check if ban period is in the future
+        try:
+            start = datetime.fromtimestamp(ban_start) if isinstance(ban_start, (int, float)) else datetime.fromisoformat(str(ban_start).replace('Z', '+00:00'))
+            end = datetime.fromtimestamp(ban_end) if isinstance(ban_end, (int, float)) else datetime.fromisoformat(str(ban_end).replace('Z', '+00:00'))
+            now = datetime.now(start.tzinfo) if start.tzinfo else datetime.now()
+            
+            if now < end:
+                is_banned = True
+                # Calculate remaining seconds
+                remaining = (end - now).total_seconds()
+                period = int(remaining // 86400)  # Convert to days
+        except:
+            pass
+    
+    # Check ban status from response
+    if ban_data.get("status") == "banned" or ban_data.get("is_banned") == True:
+        is_banned = True
+    
+    # Additional check: if reason contains ban-related keywords
+    if reason and any(keyword in reason.lower() for keyword in ['ban', 'hack', 'cheat', 'violation']):
+        if not is_banned and period == 0:
+            # Might be banned but period not set
+            is_banned = True
+            period = 1  # Default to 1 month if not specified
+    
+    if is_banned:
+        if period == -1:
+            ban_status = "Permanently Banned ❌"
+            ban_type = "Permanent"
+        elif period > 0:
+            ban_status = f"Temporarily Banned ❌"
+            ban_type = "Temporary"
+        else:
+            ban_status = "Banned ❌"
+            ban_type = "Unknown"
+    else:
+        ban_status = "Not Banned ✅"
+        ban_type = "Not Banned"
+    
+    # Calculate ban duration info
+    ban_info = {
+        "is_banned": is_banned,
+        "ban_status": ban_status,
+        "ban_type": ban_type,
+        "period_days": period if period > 0 else 0,
+        "reason": reason
+    }
+    
+    # Try to get detailed timing info
+    if is_banned and ban_start and ban_end:
+        try:
+            # Convert timestamps
+            if isinstance(ban_start, (int, float)):
+                start_dt = datetime.fromtimestamp(ban_start)
+            else:
+                start_dt = datetime.fromisoformat(str(ban_start).replace('Z', '+00:00')).replace(tzinfo=None)
+            
+            if isinstance(ban_end, (int, float)):
+                end_dt = datetime.fromtimestamp(ban_end)
+            else:
+                end_dt = datetime.fromisoformat(str(ban_end).replace('Z', '+00:00')).replace(tzinfo=None)
+            
+            now = datetime.now()
+            
+            # Calculate since (time since ban started)
+            since_seconds = int((now - start_dt).total_seconds())
+            if since_seconds < 0:
+                since_seconds = 0
+            
+            # Calculate remaining time
+            remaining_seconds = int((end_dt - now).total_seconds())
+            if remaining_seconds < 0:
+                remaining_seconds = 0
+            
+            ban_info["since"] = format_time_duration(since_seconds)
+            ban_info["unban_time"] = format_time_duration(remaining_seconds)
+            ban_info["start_time"] = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+            ban_info["end_time"] = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+            
+        except Exception as e:
+            # If parsing fails, use period
+            if period > 0:
+                ban_info["since"] = "Unknown"
+                ban_info["unban_time"] = f"{period} days"
+            else:
+                ban_info["since"] = "Unknown"
+                ban_info["unban_time"] = "Unknown"
+    else:
+        # If no detailed timing available
+        if is_banned and period > 0:
+            ban_info["since"] = "Unknown"
+            ban_info["unban_time"] = f"{period} days"
+        elif is_banned and period == -1:
+            ban_info["since"] = "Unknown"
+            ban_info["unban_time"] = "Never (Permanent)"
+        else:
+            ban_info["since"] = "N/A"
+            ban_info["unban_time"] = "N/A"
+    
+    return ban_info
+
 def check_player_info(uid: str):
     """Check player info with ban status"""
     start_time = time.time()
@@ -81,13 +230,21 @@ def check_player_info(uid: str):
             timeout=10
         )
         
-        if res.status_code != 200 or not res.json().get('nickname'):
+        if res.status_code != 200:
             return {
                 "error": True,
                 "message": "Player ID not found"
             }
         
         player_data = res.json()
+        
+        # Check if player exists
+        if not player_data.get('nickname'):
+            return {
+                "error": True,
+                "message": "Player ID not found"
+            }
+        
         nickname = player_data.get('nickname', 'N/A')
         region = player_data.get('region', 'N/A')
         level = player_data.get('level', 'N/A')
@@ -100,38 +257,83 @@ def check_player_info(uid: str):
             timeout=10
         )
         
+        response_time = f"{round((time.time() - start_time) * 1000)}ms"
+        
         if ban_response.status_code == 200:
             ban_data = ban_response.json().get("data", {})
-            period = ban_data.get("period", 0)
-            is_banned = period != 0 if period is not None else False
-            reason = ban_data.get("reason") or ban_data.get("desc") or "No reason provided"
+            ban_info = parse_ban_data(ban_data)
             
-            if is_banned:
-                ban_status = "Banned ❌"
-                ban_period = f"{period} months" if period > 0 else "Permanent"
+            # Create formatted response
+            result = {
+                "success": True,
+                "uid": uid,
+                "nickname": nickname,
+                "region": region,
+                "level": level,
+                "likes": likes,
+                "ban_status": ban_info["ban_status"],
+                "ban_type": ban_info["ban_type"],
+                "period": f"{ban_info['period_days']} days" if ban_info['period_days'] > 0 else "0 days",
+                "reason": ban_info["reason"],
+                "since": ban_info["since"],
+                "unban_time": ban_info["unban_time"],
+                "start_time": ban_info.get("start_time", "N/A"),
+                "end_time": ban_info.get("end_time", "N/A"),
+                "response_time": response_time,
+                "gif": "https://files.catbox.moe/lns4kb.gif" if ban_info["is_banned"] else "https://files.catbox.moe/7to40v.gif"
+            }
+            
+            # Add box-drawing formatted representation
+            if ban_info["is_banned"]:
+                result["formatted"] = f"""
+┌─ Bancheck Information
+├─ UID: {uid}
+├─ Username: {nickname}
+├─ Region: {region}
+├─ Level: {level}
+├─ Likes: {likes}
+├─ Status: {ban_info['ban_type']}
+├─ Since: {ban_info['since']}
+└─ Unban Time: {ban_info['unban_time']}
+"""
             else:
-                ban_status = "Not Banned ✅"
-                ban_period = "0 months"
+                result["formatted"] = f"""
+┌─ Player Information
+├─ UID: {uid}
+├─ Username: {nickname}
+├─ Region: {region}
+├─ Level: {level}
+├─ Likes: {likes}
+└─ Status: Not Banned ✅
+"""
             
-            response_time = f"{round((time.time() - start_time) * 1000)}ms"
-            
+            return result
+        else:
+            # Still return player info even if ban check fails
             return {
                 "success": True,
                 "uid": uid,
                 "nickname": nickname,
+                "region": region,
                 "level": level,
                 "likes": likes,
-                "region": region,
-                "ban_status": ban_status,
-                "period": ban_period,
-                "reason": reason,
+                "ban_status": "Unknown",
+                "ban_type": "Unknown",
+                "period": "N/A",
+                "reason": "Unable to retrieve ban status",
+                "since": "N/A",
+                "unban_time": "N/A",
                 "response_time": response_time,
-                "gif": "https://files.catbox.moe/lns4kb.gif" if is_banned else "https://files.catbox.moe/7to40v.gif"
-            }
-        else:
-            return {
-                "error": True,
-                "message": "Failed to retrieve ban status"
+                "gif": "https://files.catbox.moe/7to40v.gif",
+                "formatted": f"""
+┌─ Player Information
+├─ UID: {uid}
+├─ Username: {nickname}
+├─ Region: {region}
+├─ Level: {level}
+├─ Likes: {likes}
+└─ Status: Unknown (Ban check failed)
+"""
             }
             
     except requests.exceptions.Timeout:
@@ -162,19 +364,24 @@ def home():
         "endpoints": {
             "GET /check/<uid>": "Get player info & ban status by UID",
             "GET /check?uid=<uid>": "Get player info & ban status via query",
-            "POST /check": "Get player info & ban status via POST"
+            "POST /check": "Get player info & ban status via POST",
+            "POST /batch": "Check multiple UIDs (max 10)"
         },
         "response_fields": [
             "uid",
             "nickname",
+            "region",
             "level",
             "likes",
-            "region",
             "ban_status",
+            "ban_type",
             "period",
             "reason",
+            "since",
+            "unban_time",
             "response_time",
-            "gif"
+            "gif",
+            "formatted"
         ],
         "author": "Krsxh@blackhat"
     })
@@ -224,7 +431,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "ff-player-check",
-        "version": "3.0.0"
+        "version": "3.1.0"
     })
 
 @app.route('/batch', methods=['POST'])
